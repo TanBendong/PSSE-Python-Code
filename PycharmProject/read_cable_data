@@ -1,0 +1,14 @@
+import psspy
+
+ierr, busnumbers = psspy.abusint(sid=2,string="NUMBER")
+ierr, busnames = psspy.abuschar(sid=2,string="NAME")
+ierr, busvoltages = psspy.abusreal(sid=2,string="PU")
+ierr, bus_shunts = psspy.abuscplx(sid=2, string = "SHUNTACT")
+
+
+#bus_index = busnumbers[0].index(40)
+#voltage = busvoltages[0][bus_index]
+#name = busnames[0][bus_index]
+
+
+# from psspy import abusint

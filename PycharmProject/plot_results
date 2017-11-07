@@ -1,0 +1,13 @@
+# Read the output file
+chnf = dyntools.CHNF(outputfile)
+# assign the data to variables
+sh_ttl, ch_id, ch_data = chnf.get_data()
+
+# Do the plotting
+plt.figure(1)
+plt.plot(ch_data['time'], ch_data[1])  # Kvilldal Power
+
+plt.figure(2)
+plt.plot(ch_data['time'], ch_data[2])  # Kvilldal frequency
+
+plt.show()

@@ -1,0 +1,16 @@
+# Convert the loads for dynamic simulation
+psspy.cong(0)
+psspy.conl(0, 1, 1, [0, 0], [10.0, 10.0, 0.0, 100.0])
+psspy.conl(0, 1, 2, [0, 0], [10.0, 10.0, 0.0, 100.0])
+psspy.conl(0, 1, 3, [0, 0], [10.0, 10.0, 0.0, 100.0])
+
+# Set the time step for the dynamic simulation
+psspy.dynamics_solution_params(realar=[_f, _f, 0.005, _f, _f, _f, _f, _f])
+
+psspy.machine_array_channel([1, 2, 5500])  # Monitor Skien Power (as 5101 Hasle does not have any machine to measure frequency)
+psspy.machine_array_channel([2, 7, 5500])  # Monitor Skien Frequency (as 5101 Hasle does not have any machine to measure frequency)
+
+load = load_models.Load(3359)  # Create a load consisting of Ringhals
+
+ierr = psspy.strt(outfile=outputfile)  # Tell PSS/E to write to the output file
+

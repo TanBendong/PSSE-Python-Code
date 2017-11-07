@@ -1,0 +1,1 @@
+cmd /K "C:\Users\espehs\Virtualenvs\py27\Scripts\Activate & cd M:\Documents\SpecProject\PythonScripts & ipython & prep.py"
