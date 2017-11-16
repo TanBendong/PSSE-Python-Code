@@ -13,16 +13,29 @@ import psspyObject
 # * Separate into machine_monitor and bus_monitor
 # * Create Git synchronization schedule
 
+# Input for setting HVDC-cables
 
-case = psspyObject.psspyCase("DifferentBusOrder",5610,500)
+hvdc = [
+    [5610, 1400, "Abra"],
+    [5620, 1400, "Kadabra"]
+]
+hvdc_numbers = [5610, 5620]  # Bus numbers of HVDC connections
+hvdc_capacities = [1400, 1400]  # Check the second parameter here
+hvdc_names = ["Abra", "Kadabra"]  # Add names for HVDC names here
+
+
+case = psspyObject.PsspyCase("LowerLimit5610")
 # slackBefore = case.read_slackbus_generation()
-case.setHvdcToMax()
-#case.add_hvdc_buses()
-case.runStaticLoadFlow()
+case.set_hvdc_active_power(5610, -1400)
+#case.set_hvdc_to_max(5620, 1400)
+case.add_hvdc_buses()
+case.run_static_load_flow()
+#case.redist_slack()
 # slackAfter = case.read_slackbus_generation()
 case.save_network_data()
-case.add_fault(10.0,2,5610,[1400])  # Load step
-case.prepare_dynamic_simulation()
+case.add_fault(10.0,2,5610,[-1400])  # Load step
+#case.add_fault(10.0,2,5620,[1400])
+case.prepare_dynamic_simulation(0.005)
 case.set_monitor_channels([3300, 5600, 7000], [1,2,4,7])
 #case.set_monitor_channels([3300], [2])
 case.run_dynamic_simulation(120)

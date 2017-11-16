@@ -10,7 +10,7 @@ import dyntools
 import redirect
 
 # Custom packages
-#from psse_models import load_models
+# from psse_models import load_models
 
 
 # Default variables for PSSPY
@@ -19,10 +19,10 @@ _f = psspy.getdefaultreal()
 _s = psspy.getdefaultchar()
 
 
-class psspyCase(object):
+class PsspyCase(object):
     """Base class for cases"""
     # Constructor
-    def __init__(self, output_name, hvdcBusNr = 5610, hvdcLimit = 1400, input_network = "Scenario1"):
+    def __init__(self, output_name, input_network="Scenario1"):
         """
             Constructor for case.
             Input:
@@ -30,11 +30,12 @@ class psspyCase(object):
         """
 
         self.output_name = output_name  # For naming of plots and output
-        self.hvdcBusNr = hvdcBusNr  # PSS/E bus number for hvdc connection
-        self.hvdcLimit = hvdcLimit  # For setting limits of hvdc connection
         self.input_network = input_network  # For naming of plots and output
-        self.filename = "Bus" + str(self.hvdcBusNr) + "_" + self.input_network + "_" + self.output_name
+        self.hvdc_bus_nrs = []
+        self.hvdc_limits = []
+        self.filename = ""
 
+        # Move this self.filename line to the function for setting max hvdc error, refresh every time bus is added
         redirect.psse2py()  # Redirect the PSS/E output to the terminal
         psspy.throwPsseExceptions = True
 
@@ -59,120 +60,221 @@ class psspyCase(object):
         psspy.case(self.casefile)  # Read in the power flow data
         psspy.dyre_new([1, 1, 1, 1], self.dyrfile, "", "", "")
 
-    # Public classes
-    def setHvdcToMax(self):
+    # Public functions
+    def set_hvdc_active_power(self, hvdc_bus_nr=5610, hvdc_limit=1400):
+
+
         # Define bus number and read load at this bus
-        hvdcBusNr = self.hvdcBusNr  # PSS/E bus number
-        hvdcLimit = self.hvdcLimit  # Maximum capacity of this HVDC link
-        loadP = np.array(psspy.aloadcplx(-1, 1, "MVAACT")[1][
+        self.hvdc_bus_nrs.append(hvdc_bus_nr)  # PSS/E bus number
+        self.hvdc_limits.append(hvdc_limit)  # Maximum capacity of this HVDC link
+        buses_str = ""
+        for i in range(len(self.hvdc_bus_nrs)):
+            buses_str = buses_str + "_" + str(self.hvdc_bus_nrs[i])
+        self.filename = "limited_buses" + str(buses_str) + "_" + self.input_network + "_" + self.output_name
+
+        # Read the load at the HVDC bus
+        load_p = np.array(psspy.aloadcplx(-1, 1, "MVAACT")[1][
                              0])  # Actual MVA (MVAACT) and Nominal MVA (MVANOM) seem to give same value
-        loadNumbers = np.array(psspy.aloadint(-1, 1, "NUMBER")[1][0])  # Load all bus numbers
-        loadP = loadP[
-            np.where(loadNumbers == hvdcBusNr)[0][0]]  # Select only the load of the desired cable by finding index
+        load_numbers = np.array(psspy.aloadint(-1, 1, "NUMBER")[1][0])  # Load all bus numbers
+        load_p = load_p[
+            np.where(load_numbers == hvdc_bus_nr)[0][0]]  # load_p now has the value of the load at hvdc bus before adjustment
 
         # Set cable to max export
-        psspy.load_chng_4(hvdcBusNr, _s, [_i, _i, _i, _i, _i, _i],
-                          [hvdcLimit, _f, _f, _f, _f, _f])
+        psspy.load_chng_4(hvdc_bus_nr, _s, [_i, _i, _i, _i, _i, _i],
+                          [hvdc_limit, _f, _f, _f, _f, _f])
 
-        # The generation necessary for increased export at the cable is distributed over available capacity in the system
-        # This is so the slack bus doesn't have to take all the extra load
-        slackP = hvdcLimit - loadP  # Warning: loadP is a complex value
-        slackP = slackP.real  # Convert to real value, no longer complex as
+        # The generation necessary for increased export or import at the cable is distributed over available capacity in the system
+        # This is so the slack bus doesn't have to adjust too much
+        slack_p = hvdc_limit - load_p  # Warning: load_p is a complex value
+        slack_p = slack_p.real  # Convert to real value, no longer complex as
+        increase_gen = slack_p > 0.0  # Bool
+
 
         # Area of the HVDC bus
-        busNumbers = np.array(psspy.abusint(-1, 1, "NUMBER")[1][0])  # Get all bus numbers
-        busAreas = np.array(psspy.abusint(-1, 1, "AREA")[1][0])
-        hvdcBusArea = busAreas[
-            np.where(busNumbers == hvdcBusNr)[0][0]]  # Use bus numbers to index for the area of HVDC bus
+        bus_numbers = np.array(psspy.abusint(-1, 1, "NUMBER")[1][0])  # Get all bus numbers
+        bus_areas = np.array(psspy.abusint(-1, 1, "AREA")[1][0])
+        hvdc_bus_area = bus_areas[
+            np.where(bus_numbers == hvdc_bus_nr)[0][0]]  # Use bus numbers to index for the area of HVDC bus
 
-        # Find generation capacity of this specific area
-        areaBuses = np.array(psspy.agenbusint(-1, 1, "AREA")[1][0])
-        indices = np.where(areaBuses == hvdcBusArea)[0]
-        sysGen = np.array(psspy.agenbusreal(-1, 1, "PGEN")[1][0])  # Extract active power generation of all plants
-        areaGen = sysGen[indices]  # Only include area of hvdc bus
-        sysGenCap = np.array(psspy.agenbusreal(-1, 1, "PMAX")[1][0])  # Extract generation capacity of all plants
-        areaGenCap = sysGenCap[indices]
-        areaRemGenCap = (sum(areaGenCap) - sum(areaGen))  # Remaining generation capacity in the HVDC area
-        sysRemGenCap = (sum(sysGenCap)) - sum(sysGen)
+        if increase_gen:  # If we want to increase generation due to increased export
+            # Find generation capacity of this specific area
+            area_buses = np.array(psspy.agenbusint(-1, 1, "AREA")[1][0])
+            indices = np.where(area_buses == hvdc_bus_area)[0]
+            sys_gen = np.array(psspy.agenbusreal(-1, 1, "PGEN")[1][0])  # Extract active power generation of all plants
+            area_gen = sys_gen[indices]  # Only include area of hvdc bus
+            sys_gen_cap = np.array(psspy.agenbusreal(-1, 1, "PMAX")[1][0])  # Extract generation capacity of all plants
+            area_gen_cap = sys_gen_cap[indices]
+            area_rem_gen_cap = (sum(area_gen_cap) - sum(area_gen))  # Remaining generation capacity in the HVDC area
+            sys_rem_gen_cap = (sum(sys_gen_cap)) - sum(sys_gen)
 
-        print("Bus count is: ", psspy.agenbuscount(-1, 1)[1])
+            print("Bus count is: ", psspy.agenbuscount(-1, 1)[1])
 
-        # psspy.amachint can not return "AREA", thus we need a workaround using machine numbers and bus areas
-        # Find "AREA" of each machine
-        machineNumbers = np.array(psspy.amachint(-1, 1, "NUMBER")[1][0])
-        machineAreas = np.zeros(len(machineNumbers))
-        for i in range(len(machineNumbers)):
-            machineAreas[i] = busAreas[np.where(busNumbers == machineNumbers[i])]
+            # psspy.amachint can not return "AREA", thus we need a workaround using machine numbers and bus areas
+            # Find "AREA" of each machine
+            machine_numbers = np.array(psspy.amachint(-1, 1, "NUMBER")[1][0])
+            machine_areas = np.zeros(len(machine_numbers))
+            for i in range(len(machine_numbers)):
+                machine_areas[i] = bus_areas[np.where(bus_numbers == machine_numbers[i])]
 
-        indices = np.where(machineAreas == hvdcBusArea)[0]
-        machGen = np.array(psspy.amachreal(-1, 1, "PGEN")[1][0])  # Read PGEN of machines
-        machGenCap = np.array(psspy.amachreal(-1, 1, "PMAX")[1][0])  # Read PMAX of machines
-        machSlack = machGenCap - machGen  # NB: machSlack includes ALL machines, not just the ones in HVDC area
+            indices = np.where(machine_areas == hvdc_bus_area)[0]
+            machGen = np.array(psspy.amachreal(-1, 1, "PGEN")[1][0])  # Read PGEN of machines
+            mach_gen_cap = np.array(psspy.amachreal(-1, 1, "PMAX")[1][0])  # Read PMAX of machines
+            mach_slack = mach_gen_cap - machGen  # NB: mach_slack includes ALL machines, not just the ones in HVDC area
 
-        currentMachineNr = 0  # machine_chng_2 needs both number and ID
-        machineId = 0  # which complicates the iteration through the machines
+            current_machine_nr = 0  # machine_chng_2 needs both number and ID
+            machine_id = 0  # which complicates the iteration through the machines
 
-        # Distribute slack
-        if areaRemGenCap > slackP:  # If true distribute slack over local area
-            slackRatio = slackP / areaRemGenCap
-            machSlack = machSlack * slackRatio
+            # Distribute slack
+            if area_rem_gen_cap > slack_p:  # If true distribute slack over local area
+                slack_ratio = slack_p / area_rem_gen_cap
+                mach_slack = mach_slack * slack_ratio
 
-            # Set each generator to unique value
-            for i in indices:  # Iterate through each in-service machine and set load
-                if currentMachineNr != machineNumbers[i]:  # new machine
-                    machineId = 1
-                    currentMachineNr = machineNumbers[i]
-                else:  # Same machine as previous
-                    machineId = machineId + 1
+                # Set each generator to unique value
+                for i in indices:  # Iterate through each in-service machine and set load
+                    if current_machine_nr != machine_numbers[i]:  # new machine
+                        machine_id = 1
+                        current_machine_nr = machine_numbers[i]
+                    else:  # Same machine as previous
+                        machine_id = machine_id + 1
 
-                psspy.machine_chng_2(currentMachineNr, str(machineId),
-                                     [_i, _i, _i, _i, _i, _i],
-                                     [machGen[i] + machSlack[i], _f, _f, _f, _f, _f, _f,
-                                      _f, _f, _f, _f, _f, _f, _f, _f,
-                                      _f, _f])
+                    psspy.machine_chng_2(current_machine_nr, str(machine_id),
+                                         [_i, _i, _i, _i, _i, _i],
+                                         [machGen[i] + mach_slack[i], _f, _f, _f, _f, _f, _f,
+                                          _f, _f, _f, _f, _f, _f, _f, _f,
+                                          _f, _f])
 
-        else:
-            # 1st set all generation to max in local area
-            for i in indices:  # Iterate through machines in local area and set max generation
-                if currentMachineNr != machineNumbers[i]:  # new machine
-                    machineId = 1
-                    currentMachineNr = machineNumbers[i]
-                else:  # Same machine as previous
-                    machineId = machineId + 1
+            else:
+                # 1st set all generation to max in local area
+                for i in indices:  # Iterate through machines in local area and set max generation
+                    if current_machine_nr != machine_numbers[i]:  # new machine
+                        machine_id = 1
+                        current_machine_nr = machine_numbers[i]
+                    else:  # Same machine as previous
+                        machine_id = machine_id + 1
 
-                psspy.machine_chng_2(currentMachineNr, str(machineId),
-                                     [_i, _i, _i, _i, _i, _i],
-                                     [machGenCap[i], _f, _f, _f, _f, _f, _f, _f,
-                                      _f, _f, _f, _f, _f, _f, _f, _f, _f])
+                    psspy.machine_chng_2(current_machine_nr, str(machine_id),
+                                         [_i, _i, _i, _i, _i, _i],
+                                         [mach_gen_cap[i], _f, _f, _f, _f, _f, _f, _f,
+                                          _f, _f, _f, _f, _f, _f, _f, _f, _f])
 
-            # Recalculate slack
-            slackP = slackP - sum(machSlack[indices])  # Recalculate the slack that needs to be distributed
-            # AREAREMGENCAP IS THE PROBLEM! CHECK IF THIS HAS LEAD TO OTHER ERRORS?
-            sysRemGenCap = sysRemGenCap - sum(machSlack[indices])  # Recalculate remaining generation capacity
-            machSlack[indices] = 0  # Maxed generators = can't take more slack
-            slackRatio = slackP / sysRemGenCap
-            machSlack = machSlack * slackRatio
+                # Recalculate slack
+                slack_p = slack_p - sum(mach_slack[indices])  # Recalculate the slack that needs to be distributed
+                sys_rem_gen_cap = sys_rem_gen_cap - sum(mach_slack[indices])  # Recalculate remaining generation capacity
+                mach_slack[indices] = 0  # Maxed generators = can't take more slack
+                slack_ratio = slack_p / sys_rem_gen_cap
+                mach_slack = mach_slack * slack_ratio
 
-            # Distribute this new slack across the rest of the system
-            machineId = 0
-            currentMachineNr = 0
-            for i in range(len(machSlack)):  # Increase generation of all generators in system
-                if currentMachineNr != machineNumbers[i]:  # New machine
-                    machineId = 1
-                    currentMachineNr = machineNumbers[i]
-                else:  # Same machine as previous
-                    machineId = machineId + 1
-                psspy.machine_chng_2(currentMachineNr, str(machineId),
-                                     [_i, _i, _i, _i, _i, _i],
-                                     [machGen[i] + machSlack[i], _f, _f, _f, _f, _f, _f,
-                                      _f, _f, _f, _f, _f, _f, _f, _f,
-                                      _f,
-                                      _f])
+                # Distribute this new slack across the rest of the system
+                machine_id = 0
+                current_machine_nr = 0
+                for i in range(len(mach_slack)):  # Increase generation of all generators in system
+                    if current_machine_nr != machine_numbers[i]:  # New machine
+                        machine_id = 1
+                        current_machine_nr = machine_numbers[i]
+                    else:  # Same machine as previous
+                        machine_id = machine_id + 1
+                    psspy.machine_chng_2(current_machine_nr, str(machine_id),
+                                         [_i, _i, _i, _i, _i, _i],
+                                         [machGen[i] + mach_slack[i], _f, _f, _f, _f, _f, _f,
+                                          _f, _f, _f, _f, _f, _f, _f, _f,
+                                          _f,
+                                          _f])
+
+        else:  # If we want to decrease generation due to increased import
+               # This code is basically exactly the same as the case of increased export! Some adjustments
+               # Very inefficient way of doing it, but time constraints
+
+            # Find generation capacity of this specific area
+            area_buses = np.array(psspy.agenbusint(-1, 1, "AREA")[1][0])
+            indices = np.where(area_buses == hvdc_bus_area)[0]
+            sys_gen = np.array(psspy.agenbusreal(-1, 1, "PGEN")[1][0])  # Extract active power generation of all plants
+            area_gen = sys_gen[indices]  # Only include area of hvdc bus
+            sys_gen_cap = np.array(psspy.agenbusreal(-1, 1, "PMAX")[1][0])  # Extract generation capacity of all plants
+            area_gen_cap = sys_gen_cap[indices]
+            area_rem_gen = sum(area_gen)  # Currently active generation in the HVDC area
+            sys_rem_gen = sum(sys_gen)  # Currently active generation in the system
+
+            print("Bus count is: ", psspy.agenbuscount(-1, 1)[1])
+
+            # psspy.amachint can not return "AREA", thus we need a workaround using machine numbers and bus areas
+            # Find "AREA" of each machine
+            machine_numbers = np.array(psspy.amachint(-1, 1, "NUMBER")[1][0])
+            machine_areas = np.zeros(len(machine_numbers))
+            for i in range(len(machine_numbers)):
+                machine_areas[i] = bus_areas[np.where(bus_numbers == machine_numbers[i])]
+
+            indices = np.where(machine_areas == hvdc_bus_area)[0]
+            machGen = np.array(psspy.amachreal(-1, 1, "PGEN")[1][0])  # Read PGEN of machines
+            mach_gen_cap = np.array(psspy.amachreal(-1, 1, "PMAX")[1][0])  # Read PMAX of machines
+            mach_slack = machGen    # The generation that can be reduced when import is increased
+                                    # NB: mach_slack includes ALL machines, not just the ones in HVDC area
+
+            current_machine_nr = 0  # machine_chng_2 needs both number and ID
+            machine_id = 0  # which complicates the iteration through the machines
+
+            # Distribute slack
+            if abs(area_rem_gen) > abs(slack_p):  # Distribute slack over local area if the generators can take it all
+                slack_ratio = abs(slack_p) / area_rem_gen
+                mach_slack = mach_slack * slack_ratio
+
+                # Set each generator to unique value
+                for i in indices:  # Iterate through each in-service machine and set generation
+                    if current_machine_nr != machine_numbers[i]:  # new machine
+                        machine_id = 1
+                        current_machine_nr = machine_numbers[i]
+                    else:  # Same machine as previous
+                        machine_id = machine_id + 1
+
+                    psspy.machine_chng_2(current_machine_nr, str(machine_id),
+                                         [_i, _i, _i, _i, _i, _i],
+                                         [machGen[i] - mach_slack[i], _f, _f, _f, _f, _f, _f,
+                                          _f, _f, _f, _f, _f, _f, _f, _f,
+                                          _f, _f])
+
+            else:
+                # First set all generation to 0 in local area
+                for i in indices:  # Iterate through machines in local area and set to zero generation
+                    if current_machine_nr != machine_numbers[i]:  # new machine
+                        machine_id = 1
+                        current_machine_nr = machine_numbers[i]
+                    else:  # Same machine as previous
+                        machine_id = machine_id + 1
+
+                    psspy.machine_chng_2(current_machine_nr, str(machine_id),
+                                         [_i, _i, _i, _i, _i, _i],
+                                         [0.0, _f, _f, _f, _f, _f, _f, _f,
+                                          _f, _f, _f, _f, _f, _f, _f, _f, _f])
+
+                # Recalculate slack
+                slack_p = slack_p + sum(mach_slack[indices])  # Recalculate the slack that needs to be distributed
+                sys_rem_gen_cap = sys_rem_gen - sum(
+                    mach_slack[indices])  # Recalculate remaining generation capacity
+                mach_slack[indices] = 0  # Generators at 0 = can't take more slack
+                slack_ratio = abs(slack_p) / sys_rem_gen_cap
+                mach_slack = mach_slack * slack_ratio
+
+                # Distribute this new slack across the rest of the system
+                machine_id = 0
+                current_machine_nr = 0
+                for i in range(len(mach_slack)):  # Increase generation of all generators in system
+                    if current_machine_nr != machine_numbers[i]:  # New machine
+                        machine_id = 1
+                        current_machine_nr = machine_numbers[i]
+                    else:  # Same machine as previous
+                        machine_id = machine_id + 1
+                    psspy.machine_chng_2(current_machine_nr, str(machine_id),
+                                         [_i, _i, _i, _i, _i, _i],
+                                         [machGen[i] - mach_slack[i], _f, _f, _f, _f, _f, _f,
+                                          _f, _f, _f, _f, _f, _f, _f, _f,
+                                          _f,
+                                          _f])
 
                 # All generation has now been distributed
-    def runStaticLoadFlow(self):
+
+            # Now all slack has been distributed
+    def run_static_load_flow(self):
         psspy.fdns([0, 0, 0, 1, 1, 1, 99, 0])  # Fixed slope decoupled Newton-Raphson
-    def prepare_dynamic_simulation(self,p_zip = [10.0, 10.0], q_zip = [10.0, 10.0]):
+    def prepare_dynamic_simulation(self,time_step = 0.005, p_zip = [10.0, 10.0], q_zip = [10.0, 10.0]):
         self.outputfile = os.path.join(os.getcwd(), self.filename)  # Store dynamic simulation
 
         # Convert the loads for dynamic simulation
@@ -182,7 +284,12 @@ class psspyCase(object):
         psspy.conl(0, 1, 3, [0, 0], [p_zip[0], p_zip[1], q_zip[0], q_zip[1]])  # Default tuning from S. M. Hamre's thesis tuning
 
         # Set the time step for the dynamic simulation
-        psspy.dynamics_solution_params(realar=[_f, _f, 0.005, _f, _f, _f, _f, _f])
+        psspy.dynamics_solution_params(realar=[_f, _f, time_step, _f, _f, _f, _f, _f])
+
+        # Enable relative angle monitoring
+        ibusex = 0  # = 3300 for setting 3300 as reference
+        psspy.set_relang(1, ibusex)
+
     def set_monitor_channels(self,buses = (5600, 3300, 7000), quantities = (1,2,4,7)):
 
         machine_monitor = np.zeros([len(buses)*len(quantities), 3])
@@ -243,6 +350,9 @@ class psspyCase(object):
             plt.figure(plot_title)
             indices = np.where(self.machine_monitor[:,1] == quantities[i])[0]
             for j in range(len(indices)):
+                if plot_title == "SPEED":
+                    for k in range(len(self.ch_data[indices[j]+1])):  # Adjust data so that frequency is appropriate
+                        self.ch_data[indices[j]+1][k] = 50 + self.ch_data[indices[j]+1][k]*50
                 plt.plot(self.ch_data['time'], self.ch_data[indices[j]+1])
 
             plt.xlabel("Time (s)")
@@ -291,52 +401,8 @@ class psspyCase(object):
         plant_gen = np.array(psspy.agenbusreal(-1,1,"PGEN")[1][0])
         index = np.where(plant_bus_numbers == slack_bus_number)
         return plant_gen[index]
-    def save_network_data(self,filename = "SavedNetworkData"):
-        psspy.save(os.path.join(os.getcwd(),self.filename+".sav"))
-    def alternative_plotting(self):
-        # If I can't get the smart plotting to work before displaying to Sigurd & Co.
-        # Do the plotting
-        plt.figure("ANGLE")
-        plt.plot(self.ch_data['time'], self.ch_data[1])  # See channel monitoring
-        plt.plot(self.ch_data['time'], self.ch_data[5])
-        plt.plot(self.ch_data['time'], self.ch_data[9])
-        plt.xlabel("Time (s)")
-        plt.ylabel("Angle (deg)")
-        plt.legend(["Bus 5600", "Bus 3300", "Bus 7000"])
-        plt.grid()
-        plt.savefig("Angle"+"_"+self.filename)
-
-        plt.figure("PELEC")
-        plt.plot(self.ch_data['time'], self.ch_data[2])  # See channel monitoring
-        plt.plot(self.ch_data['time'], self.ch_data[6])
-        plt.plot(self.ch_data['time'], self.ch_data[10])
-        plt.xlabel("Time (s)")
-        plt.ylabel("Pelec (p.u.)")
-        plt.legend(["Bus 5600", "Bus 3300", "Bus 7000"])
-        plt.grid()
-        plt.savefig("Pelec"+"_"+self.filename)
-
-        plt.figure("ETERM")
-        plt.plot(self.ch_data['time'], self.ch_data[3])  # See channel monitoring
-        plt.plot(self.ch_data['time'], self.ch_data[7])
-        plt.plot(self.ch_data['time'], self.ch_data[11])
-        plt.xlabel("Time (s)")
-        plt.ylabel("Terminal voltage (p.u.)")
-        plt.legend(["Bus 5600", "Bus 3300", "Bus 7000"])
-        plt.grid()
-        plt.savefig("Eterm"+"_"+self.filename)
-
-        plt.figure("SPEED")
-        plt.plot(self.ch_data['time'], self.ch_data[4])  # See channel monitoring
-        plt.plot(self.ch_data['time'], self.ch_data[8])
-        plt.plot(self.ch_data['time'], self.ch_data[12])
-        plt.xlabel("Time (s)")
-        plt.ylabel("Speed (p.u.)")
-        plt.legend(["Bus 5600", "Bus 3300", "Bus 7000"])
-        plt.grid()
-        plt.savefig("Speed"+"_"+self.filename)
-
-        plt.show()
+    def save_network_data(self):
+        psspy.save(os.path.join(os.getcwd(), self.filename+".sav"))
     def add_fault(self,time, type, bus, extras):
         # Input param extras will be read differently depending on type
         # Example: time=0.1, type=1, bus=5600, extras=(6000) to trip branch connecting 5600 and 6000
@@ -381,8 +447,8 @@ class psspyCase(object):
         load_numbers = np.array(psspy.aloadint(-1,1,"NUMBER")[1][0])
         load_index = np.where(load_numbers == bus_number)[0]
         load_step = load_step / len(load_index)  # To split step over all loads at bus
-        loadP = np.array(psspy.aloadcplx(-1, 1, "MVAACT")[1][0])
-        present_load = loadP[load_index]
+        load_p = np.array(psspy.aloadcplx(-1, 1, "MVAACT")[1][0])
+        present_load = load_p[load_index]
         for i in range(len(load_index)):  # CREATE FOR LOOP NOW TO ITERATE THROUGH AND STEP LOAD AT EACH LOAD AT BUS
             load_id = str(i + 1)
             psspy.load_chng_4(bus_number, load_id, [_i, _i, _i, _i, _i, _i], [present_load[i] + load_step, _f, _f, _f, _f, _f])
@@ -428,8 +494,39 @@ class psspyCase(object):
             legend.append("Bus " + str(int(self.machine_monitor[indices[i]][2])))
 
         return legend
-    def redist_slack(self):
+    def redist_slack(self, slack_bus_number = 3300):
         # Use same methodology as described in setHvdcToMax
         # Continue until the excess slack is less than 1% of max slack generator capacity
-        #
+
+
+        machGen = np.array(psspy.amachreal(-1, 1, "PGEN")[1][0])  # Read PGEN of machines
+        mach_gen_cap = np.array(psspy.amachreal(-1, 1, "PMAX")[1][0])  # Read PMAX of machines
+        mach_slack = mach_gen_cap - machGen  # NB: mach_slack includes ALL machines, not just the ones in HVDC area
+        mach_indices = np.array(psspy.amachint(-1, 1, "NUMBER")[1][0])
+        slack_mach_indices = np.where(mach_indices == slack_bus_number)
+        slack_mach_exceeded = sum(mach_slack[slack_mach_indices])
+        machine_numbers = np.array(psspy.amachint(-1, 1, "NUMBER")[1][0])
+
+        # Distribute this new slack across the rest of the system
+        machine_id = 0
+        current_machine_nr = 0
+        for i in range(len(mach_slack)):  # Increase generation of all generators in system
+            if current_machine_nr != machine_numbers[i]:  # New machine
+                machine_id = 1
+                current_machine_nr = machine_numbers[i]
+            else:  # Same machine as previous
+                machine_id = machine_id + 1
+            psspy.machine_chng_2(current_machine_nr, str(machine_id),
+                                 [_i, _i, _i, _i, _i, _i],
+                                 [machGen[i] + mach_slack[i], _f, _f, _f, _f, _f, _f,
+                                  _f, _f, _f, _f, _f, _f, _f, _f,
+                                  _f,
+                                  _f])
+
+            # All generation has now been distributed
+            # Run new power flow and see if limits are exceeded more than 1% of slack bus
+            # Recursive algorithm if
+            self.runStaticLoadFlow()
+            pass
+        
         pass
